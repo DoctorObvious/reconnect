@@ -1,122 +1,110 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import fitdecode
 import zipfile
 import io
 
-# --- Page Config ---
 st.set_page_config(page_title="Garmin Deep Dive", layout="wide")
+st.title("❤️ Garmin Heart Rate Explorer (Full History)")
 
-st.title("❤️ Garmin Heart Rate Explorer")
-st.markdown("""
-    **Instructions:**
-    1. Request your data from Garmin (Account Settings -> Export Your Data).
-    2. Upload the `.zip` file here.
-    3. The app will extract your daily heart rate monitoring files and calculate custom stats.
-""")
-
-# --- Helper: Parse a single FIT file for HR data ---
-def parse_monitoring_file(file_bytes):
-    """
-    Extracts heart rate timestamps and values from a binary FIT file.
-    Returns a list of dictionaries: {'timestamp': ..., 'heart_rate': ...}
-    """
+# --- Helper: Parse FIT file ---
+def parse_fit_file(file_bytes, file_name):
     data = []
-    with fitdecode.FitReader(file_bytes) as fit:
-        for frame in fit:
-            if isinstance(frame, fitdecode.FitDataMessage):
-                if frame.name == 'monitoring':
-                    # Garmin Monitoring messages often contain heart_rate
-                    # Sometimes it's in a different field depending on device generation
-                    if frame.has_field('heart_rate'):
-                        data.append({
-                            'timestamp': frame.get_value('timestamp'),
-                            'heart_rate': frame.get_value('heart_rate')
-                        })
+    try:
+        with fitdecode.FitReader(file_bytes) as fit:
+            for frame in fit:
+                if isinstance(frame, fitdecode.FitDataMessage):
+                    # We strictly look for 'monitoring' (Daily HR)
+                    # We ignore 'record' (Activity GPS/HR) to speed things up
+                    if frame.name == 'monitoring' and frame.has_field('heart_rate'):
+                        timestamp = frame.get_value('timestamp')
+                        hr = frame.get_value('heart_rate')
+                        if timestamp and hr:
+                            data.append({
+                                'timestamp': timestamp,
+                                'heart_rate': hr,
+                                'source_file': file_name
+                            })
+    except Exception:
+        pass # Skip corrupted files
     return data
 
-# --- Main App Logic ---
-uploaded_zip = st.file_uploader("Upload Garmin Export (ZIP)", type="zip")
+# --- Main App ---
+uploaded_zip = st.file_uploader("Upload Master Garmin Export (ZIP)", type="zip")
 
 if uploaded_zip:
-    with st.spinner("Reading ZIP file structure..."):
+    all_hr_data = []
+    
+    with st.spinner("Scanning ZIP structure..."):
         try:
-            # Load zip into memory
-            zf = zipfile.ZipFile(uploaded_zip)
-            all_files = zf.namelist()
-        
-            # --- DEBUG SECTION: Show user what is inside ---
-            with st.expander("📂 Debug: View ZIP Contents"):
-                st.write(f"Total files found: {len(all_files)}")
-                st.write("First 10 files:", all_files[:10])
-                
-                # Filter for ANY .fit files to see if they exist at all
-                fit_files = [f for f in all_files if f.lower().endswith('.fit')]
-                st.write(f"Total .fit files found: {len(fit_files)}")
-                if fit_files:
-                    st.write("Sample .fit files:", fit_files[:5])
-
-            # Find wellness/monitoring files. 
-            # Structure is typically: DI_CONNECT/DI-Connect-Wellness/
-            # Filenames often look like: ..._Monitoring_... .fit
-            # --- SEARCH LOGIC: Case-Insensitive Search ---
-            # We look for files that have 'monitoring' in the name AND end in '.fit'
-            # regardless of which folder they are in.
-            monitoring_files = [f for f in all_files if 'monitoring' in f.lower() and f.lower().endswith('.fit')]        
+            main_zip = zipfile.ZipFile(uploaded_zip)
+            all_files = main_zip.namelist()
             
-            if not monitoring_files:
-                st.error("❌ No files matching 'Monitoring' and '.fit' were found.")
-                st.info("Check the 'Debug' section above. If your files are named differently (e.g., 'Wellness'), you may need to adjust the search logic.")
+            # Find ALL "UploadedFiles" zips
+            part_files = [f for f in all_files if "UploadedFiles" in f and f.endswith(".zip")]
+            
+            if not part_files:
+                st.error("Could not find any 'UploadedFiles' parts.")
             else:
-                st.success(f"✅ Found {len(monitoring_files)} monitoring files!")
-
-                # --- Processing Limit ---
-                limit_files = st.slider("Number of days to process", 1, min(len(monitoring_files), 1000), 5)
-                files_to_process = monitoring_files[:limit_files]
-
-                all_hr_data = []
-                progress_bar = st.progress(0)
-
-                # --- Processing ---
-                all_hr_data = []
-                progress_bar = st.progress(0)
+                st.info(f"Found {len(part_files)} data parts. Merging them into one dataset...")
                 
-                for i, filename in enumerate(files_to_process):
-                    # Update progress bar
-                    progress_bar.progress((i + 1) / len(files_to_process))
+                # --- Progress Bar for PARTS ---
+                part_progress = st.progress(0)
+                
+                # Loop through Part 1, Part 2, Part 3...
+                for i, part_name in enumerate(part_files):
                     
-                    try:
-                        with zf.open(filename) as f:
-                            file_bytes = f.read()
-                            daily_data = parse_monitoring_file(file_bytes)
-                            all_hr_data.extend(daily_data)
-                    except Exception as e:
-                        st.warning(f"Skipped file {filename} due to error: {e}")
+                    # Open the inner zip
+                    inner_zip_bytes = main_zip.read(part_name)
+                    inner_zip = zipfile.ZipFile(io.BytesIO(inner_zip_bytes))
+                    
+                    # Find FIT files inside this part
+                    fit_files = [f for f in inner_zip.namelist() if f.lower().endswith('.fit')]
+                    
+                    # --- Progress Bar for FILES inside the part ---
+                    # We'll just show a status text update to avoid double-progress-bar confusion
+                    status_text = st.empty()
+                    
+                    # OPTIONAL: Still limit files per part for testing? 
+                    # Set to 1000 or len(fit_files) for "Full Mode"
+                    files_to_process = fit_files # [:50] # Uncomment [:50] to test quickly
+                    
+                    for j, fit_file in enumerate(files_to_process):
+                        status_text.text(f"Processing {part_name} | File {j+1}/{len(files_to_process)}")
+                        
+                        with inner_zip.open(fit_file) as f:
+                            # Parse
+                            file_data = parse_fit_file(f.read(), fit_file)
+                            all_hr_data.extend(file_data)
+                    
+                    # Update Part Progress
+                    part_progress.progress((i + 1) / len(part_files))
                 
-                # Convert to DataFrame
+                st.success("Processing Complete!")
+
+                # --- Visualization ---
                 if all_hr_data:
                     df = pd.DataFrame(all_hr_data)
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+                    df['date'] = df['timestamp'].dt.date
                     
-                    # Basic cleanup
-                    if 'timestamp' in df.columns:
-                        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-                        df['date'] = df['timestamp'].dt.date
-                        
-                        st.metric("Total HR Samples", f"{len(df):,}")
-                        
-                        # --- Visualization ---
-                        st.subheader("Raw Data Preview")
-                        st.dataframe(df.head())
-                        
-                        st.subheader("Simple Plot")
-                        fig = px.scatter(df, x='timestamp', y='heart_rate', title="Raw Heart Rate Data")
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.error("Data extracted but no timestamp found. Check FIT file format.")
+                    # Sort by date just in case Parts were out of order
+                    df = df.sort_values('timestamp')
+                    
+                    st.metric("Total Heart Rate Samples", f"{len(df):,}")
+                    
+                    # Group by Day
+                    daily_stats = df.groupby('date')['heart_rate'].mean().reset_index()
+                    
+                    fig = px.scatter(daily_stats, x='date', y='heart_rate', 
+                                     title="Daily Average Heart Rate (All Time)",
+                                     labels={'heart_rate': 'Avg HR (bpm)'})
+                    
+                    fig.update_layout(xaxis=dict(rangeslider=dict(visible=True), type="date"))
+                    st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.warning("Processed files but found no heart rate data points. The files might be empty or formatted differently.")
+                    st.warning("No monitoring data found. These parts might contain only Activity data.")
 
-        except zipfile.BadZipFile:
-            st.error("The uploaded file is not a valid ZIP file.")
+        except Exception as e:
+            st.error(f"Error: {e}")

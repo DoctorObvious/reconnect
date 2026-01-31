@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Garmin Health Explorer", layout="wide")
+st.set_page_config(page_title="Re-Connect: Garmin Health Explorer", layout="wide")
 
 # --- CORE PARSER (The Timekeeper) ---
 def parse_fit_file(file_bytes, source_name):
@@ -163,8 +163,7 @@ def process_garmin_data(zip_source, limit=None, is_local=False):
 
 
 # --- UI LAYOUT ---
-
-st.title("❤️ Garmin Family Explorer")
+st.title("❤️ Re-Connect: Garmin Health Explorer")
 
 # --- SIDEBAR CONTROLS ---
 with st.sidebar:
@@ -185,7 +184,7 @@ with st.sidebar:
             zip_source = st.file_uploader("Upload Zip", type="zip")
         else:
             # Default to your dev path
-            default_path = "/Users/mphillips/Downloads/MyGarminExport/DI_CONNECT/DI-Connect-Uploaded-Files"
+            default_path = "/Users/mphillips/Downloads/4bdb4ebf-8e55-497d-863f-6200bff583f6_1/DI_CONNECT/DI-Connect-Uploaded-Files"
             local_path = st.text_input("UploadedFiles Folder Path", default_path)
             
             if os.path.exists(local_path):
@@ -203,12 +202,12 @@ with st.sidebar:
         is_local = False
 
     # 3. Processing Limits
-    limit = None # Default = No Limit
+    limit = 4000 # Default = No Limit
     
-    if debug_mode and zip_source:
+    if zip_source:
         st.subheader("Processing Limits")
         # Slider 100 -> 10,000.  If 10,000 -> Treat as "No Limit"
-        slider_val = st.slider("Max Files (Newest First)", 100, 10000, 1000, step=100)
+        slider_val = st.slider("Max Files (Newest First)", 100, 10000, 4000, step=100)
         
         if slider_val < 10000:
             limit = slider_val
@@ -242,10 +241,11 @@ if process_btn and zip_source:
         
         # Aggregation
         daily = df.groupby('date')['heart_rate'].agg(['mean', 'min', 'max', 'count']).reset_index()
+        daily['mean'] = daily['mean'].round(1)
         
         # Coverage Calculation (1440 mins = 100%)
         # Cap at 100% just in case of duplicate data
-        daily['coverage'] = (daily['count'] / 1440 * 100).clip(upper=100)
+        daily['coverage'] = (daily['count'] / 1440 * 100).clip(upper=100).round(1)
         
         fig = px.scatter(daily, x='date', y='mean',
                          color='coverage',

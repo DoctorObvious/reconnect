@@ -82,8 +82,10 @@ def is_monitoring_file(file_bytes):
 
 # --- Main App Logic ---
 if os.path.exists(LOCAL_ZIP_PATH):
-    # Find all zip parts automatically (Part1, Part2, etc.)
     uploaded_zips = [os.path.join(LOCAL_ZIP_PATH, f) for f in os.listdir(LOCAL_ZIP_PATH) if f.endswith('.zip') and "UploadedFiles" in f]
+    # Sort the Zips themselves (Part1, Part2, Part3)
+    uploaded_zips.sort() 
+    
     st.info(f"📂 Scanning folder: `{LOCAL_ZIP_PATH}`")
     st.write(f"Found {len(uploaded_zips)} zip archives.")
 else:
@@ -93,8 +95,8 @@ else:
 if uploaded_zips:
     if st.button("Generate Heart Rate Plot"):
         
-        # Start with a safe limit to verify it works
-        max_files = st.slider("Max Files to Process", 100, 5000, 1000)
+        # Increased default limit to ensure we cover full days
+        max_files = st.slider("Max Files to Process", 100, 15000, 2000)
         
         all_hr_data = []
         files_processed = 0
@@ -106,6 +108,10 @@ if uploaded_zips:
             try:
                 with zipfile.ZipFile(zip_path) as zf:
                     fit_files = [f for f in zf.namelist() if f.lower().endswith('.fit')]
+                    
+                    # --- CRITICAL FIX: SORT FILES ---
+                    # This ensures we process Morning -> Afternoon -> Night in order
+                    fit_files.sort()
                     
                     for i, fit_filename in enumerate(fit_files):
                         if files_processed >= max_files:
@@ -141,13 +147,21 @@ if uploaded_zips:
             df['date'] = df['timestamp'].dt.date
             
             # --- Visualization ---
-            st.subheader("📈 Daily Average Heart Rate (Calculated from Raw Data)")
+            st.subheader("📈 Daily Average Heart Rate")
             
-            # Filter out "empty" days
+            # Calculate coverage (how many minutes of data do we have per day?)
             daily_stats = df.groupby('date')['heart_rate'].agg(['mean', 'count']).reset_index()
-            daily_stats = daily_stats[daily_stats['count'] > 100] # Ignore days with negligible data
             
-            fig = px.scatter(daily_stats, x='date', y='mean', title="Daily Mean HR")
+            # A full day of monitoring (1 per min) should be ~1440 samples.
+            # Let's flag days that have low coverage.
+            daily_stats['coverage_percent'] = (daily_stats['count'] / 1440) * 100
+            
+            fig = px.scatter(daily_stats, x='date', y='mean', 
+                             title="Daily Mean HR",
+                             hover_data=['count', 'coverage_percent'],
+                             color='coverage_percent', # Color dot by how "complete" the day is
+                             labels={'mean': 'Avg HR', 'coverage_percent': '% of Day Recorded'})
+            
             fig.add_scatter(x=daily_stats['date'], y=daily_stats['mean'].rolling(7).mean(), mode='lines', name='7-Day Avg', line=dict(color='red'))
             
             fig.update_layout(xaxis=dict(rangeslider=dict(visible=True), type="date"))
@@ -156,4 +170,4 @@ if uploaded_zips:
             with st.expander("View Raw Data Sample"):
                 st.dataframe(df.head(1000))
         else:
-            st.warning("No data found. If this persists, verify the file path again.")
+            st.warning("No data found.")

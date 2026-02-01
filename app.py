@@ -282,11 +282,19 @@ if st.session_state['analysis_active'] and zip_source:
             # 1. Standard Stats
             daily = filtered_df.groupby('date')['heart_rate'].agg(['mean', 'min', 'max', 'count'])
             
-            # 2. Custom Percentiles
+            # 2. Custom Percentiles & Tooltip Setup
+            # We build a dictionary for hover_data to dynamically include the chosen percentiles
+            hover_cols = {'min': True, 'max': True, 'count': False, 'coverage': ':.1f'} 
+
             if show_p1:
-                daily[f'p{p1_val}'] = filtered_df.groupby('date')['heart_rate'].quantile(p1_val/100)
+                p1_col = f'p{p1_val}'
+                daily[p1_col] = filtered_df.groupby('date')['heart_rate'].quantile(p1_val/100).round(1)
+                hover_cols[p1_col] = ':.1f' # Add to tooltip with 1 decimal formatting
+
             if show_p2:
-                daily[f'p{p2_val}'] = filtered_df.groupby('date')['heart_rate'].quantile(p2_val/100)
+                p2_col = f'p{p2_val}'
+                daily[p2_col] = filtered_df.groupby('date')['heart_rate'].quantile(p2_val/100).round(1)
+                hover_cols[p2_col] = ':.1f' # Add to tooltip with 1 decimal formatting
 
             daily = daily.reset_index()
             daily['mean'] = daily['mean'].round(1)
@@ -303,7 +311,7 @@ if st.session_state['analysis_active'] and zip_source:
             fig = px.scatter(daily, x='date', y='mean',
                              color='coverage',
                              color_continuous_scale='Blues',
-                             hover_data=['min', 'max', 'count'],
+                             hover_data=hover_cols, # <--- Updated to use dynamic dictionary
                              labels={'mean': 'Daily Mean HR', 'coverage': '% Coverage'},
                              title=f"Heart Rate ({start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')})")
             

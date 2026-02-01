@@ -49,12 +49,17 @@ def parse_fit_file(file_bytes, source_name):
                             current_time = current_time + timedelta(seconds=delta)
                             record_time = current_time
                             
+                        # Extraction Logic
                         if record_time and frame.has_field('heart_rate'):
-                            data.append({
-                                'timestamp': record_time,
-                                'heart_rate': frame.get_value('heart_rate'),
-                                'source': source_name
-                            })
+                            hr = frame.get_value('heart_rate')
+                            
+                            # --- Only keep valid physiology (> 0) ---
+                            if hr is not None and hr > 0:
+                                data.append({
+                                    'timestamp': record_time,
+                                    'heart_rate': hr,
+                                    'source': source_name
+                                })
     except Exception:
         return []
     return data

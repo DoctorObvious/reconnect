@@ -165,6 +165,10 @@ def process_garmin_data(zip_source, limit=None, is_local=False):
 # --- UI LAYOUT ---
 st.title("❤️ Re-Connect: Garmin Health Explorer")
 
+# Initialize Session State for persistence
+if 'analysis_active' not in st.session_state:
+    st.session_state['analysis_active'] = False
+
 # --- SIDEBAR CONTROLS ---
 with st.sidebar:
     # 1. Debug Toggle
@@ -201,12 +205,15 @@ with st.sidebar:
         zip_source = st.file_uploader("Upload Garmin Export (Zip)", type="zip")
         is_local = False
 
+    # Reset state if the source changes (e.g. user removes the file)
+    if not zip_source:
+        st.session_state['analysis_active'] = False
+
     # 3. Processing Limits
     limit = 4000 # Default = No Limit
     
     if zip_source:
         st.subheader("Processing Limits")
-        # Slider 100 -> 10,000.  If 10,000 -> Treat as "No Limit"
         slider_val = st.slider("Max Files (Newest First)", 100, 10000, 4000, step=100)
         
         if slider_val < 10000:
@@ -216,13 +223,16 @@ with st.sidebar:
             limit = None
     
     # 4. Action Button
-    process_btn = st.button("Analyze Heart Rate", type="primary", disabled=not zip_source)
+    # We use a callback logic here: If clicked, update the session state
+    if st.button("Analyze Heart Rate", type="primary", disabled=not zip_source):
+        st.session_state['analysis_active'] = True
 
 
 # --- MAIN DASHBOARD ---
-if process_btn and zip_source:
+# Now we check the SESSION STATE, not just the button click
+if st.session_state['analysis_active'] and zip_source:
     
-    # Run Processor
+    # Run Processor (Cached)
     df, logs = process_garmin_data(zip_source, limit, is_local)
     
     if df is not None and not df.empty:
@@ -236,38 +246,95 @@ if process_btn and zip_source:
         else:
             c3.metric("Processing", "Full History")
 
-        # --- PLOT ---
-        st.subheader("📈 Daily Heart Rate Trends")
+        st.divider()
         
-        # Aggregation
-        daily = df.groupby('date')['heart_rate'].agg(['mean', 'min', 'max', 'count']).reset_index()
-        daily['mean'] = daily['mean'].round(1)
+        # --- VISUALIZATION CONTROLS ---
+        st.subheader("⚙️ Plot Settings")
         
-        # Coverage Calculation (1440 mins = 100%)
-        # Cap at 100% just in case of duplicate data
-        daily['coverage'] = (daily['count'] / 1440 * 100).clip(upper=100).round(1)
+        # Row 1: Percentile Controls
+        col_p1, col_p2, col_win = st.columns(3)
         
-        fig = px.scatter(daily, x='date', y='mean',
-                         color='coverage',
-                         # "Blues" scale: Light -> Dark. 
-                         # We want Dark = High Coverage. 
-                         # Default 'Blues' does exactly this (0=White/Light, 100=Dark Blue)
-                         color_continuous_scale='Blues',
-                         hover_data=['min', 'max', 'count'],
-                         labels={'mean': 'Avg HR', 'coverage': '% Complete'},
-                         title="Daily Average Heart Rate")
+        with col_p1:
+            show_p1 = st.checkbox("Show Low Percentile Line", value=True)
+            p1_val = st.number_input("Low Percentile (%)", min_value=1, max_value=49, value=10, step=1)
+            
+        with col_p2:
+            show_p2 = st.checkbox("Show High Percentile Line", value=True)
+            p2_val = st.number_input("High Percentile (%)", min_value=51, max_value=99, value=90, step=1)
+            
+        with col_win:
+            window_days = st.slider("Rolling Average Window (Days)", 1, 60, 7)
+
+        # Row 2: Time of Day Filter
+        st.caption("Time of Day Filter (e.g., Isolate sleep hours or workout windows)")
+        col_t1, col_t2 = st.columns(2)
+        start_time = col_t1.time_input("Start Time", value=datetime.strptime("00:00", "%H:%M").time())
+        end_time = col_t2.time_input("End Time", value=datetime.strptime("23:59", "%H:%M").time())
+
+        # --- DATA FILTERING ---
+        # Filter by Time of Day
+        time_mask = (df['timestamp'].dt.time >= start_time) & (df['timestamp'].dt.time <= end_time)
+        filtered_df = df[time_mask]
         
-        # Fix dot size to be smaller/cleaner
-        fig.update_traces(marker=dict(size=6, opacity=0.8))
+        if not filtered_df.empty:
+            
+            # --- AGGREGATION ---
+            # 1. Standard Stats
+            daily = filtered_df.groupby('date')['heart_rate'].agg(['mean', 'min', 'max', 'count'])
+            
+            # 2. Custom Percentiles
+            if show_p1:
+                daily[f'p{p1_val}'] = filtered_df.groupby('date')['heart_rate'].quantile(p1_val/100)
+            if show_p2:
+                daily[f'p{p2_val}'] = filtered_df.groupby('date')['heart_rate'].quantile(p2_val/100)
+
+            daily = daily.reset_index()
+            daily['mean'] = daily['mean'].round(1)
+            
+            # Coverage Calculation
+            mins_in_window = (datetime.combine(datetime.today(), end_time) - datetime.combine(datetime.today(), start_time)).seconds / 60
+            if mins_in_window == 0: mins_in_window = 1440
+            
+            daily['coverage'] = (daily['count'] / mins_in_window * 100).clip(upper=100).round(1)
+            
+            # --- PLOTTING ---
+            st.subheader("📈 Heart Rate Trends")
+            
+            fig = px.scatter(daily, x='date', y='mean',
+                             color='coverage',
+                             color_continuous_scale='Blues',
+                             hover_data=['min', 'max', 'count'],
+                             labels={'mean': 'Daily Mean HR', 'coverage': '% Coverage'},
+                             title=f"Heart Rate ({start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')})")
+            
+            fig.update_traces(marker=dict(size=6, opacity=0.8))
+            
+            # 1. Main Mean Trendline
+            fig.add_scatter(x=daily['date'], y=daily['mean'].rolling(window_days).mean(), 
+                           mode='lines', name=f'Mean ({window_days}d Avg)', 
+                           line=dict(color='black', width=3))
+            
+            # 2. Low Percentile Line
+            if show_p1:
+                col_name = f'p{p1_val}'
+                fig.add_scatter(x=daily['date'], y=daily[col_name].rolling(window_days).mean(),
+                                mode='lines', name=f'{p1_val}th % ({window_days}d Avg)',
+                                line=dict(color='cyan', width=2, dash='solid'))
+
+            # 3. High Percentile Line
+            if show_p2:
+                col_name = f'p{p2_val}'
+                fig.add_scatter(x=daily['date'], y=daily[col_name].rolling(window_days).mean(),
+                                mode='lines', name=f'{p2_val}th % ({window_days}d Avg)',
+                                line=dict(color='orangered', width=2, dash='solid'))
+            
+            fig.update_layout(xaxis=dict(rangeslider=dict(visible=True), type="date"))
+            st.plotly_chart(fig, use_container_width=True)
+            
+        else:
+            st.warning(f"No data found in the time window {start_time} - {end_time}.")
         
-        # Add Trendline
-        fig.add_scatter(x=daily['date'], y=daily['mean'].rolling(7).mean(), 
-                       mode='lines', name='7-Day Avg', line=dict(color='red', width=2))
-        
-        fig.update_layout(xaxis=dict(rangeslider=dict(visible=True), type="date"))
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # --- DEBUG LOGS (Hidden in Family Mode) ---
+        # --- DEBUG LOGS ---
         if debug_mode:
             with st.expander("🛠️ Debug Logs"):
                 for log in logs:
